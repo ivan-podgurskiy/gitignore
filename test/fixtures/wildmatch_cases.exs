@@ -26,5 +26,40 @@
     path: "foo/a/b/bar",
     opts: [pathname: true],
     expected: true
+  },
+  %{
+    name: "question mark does not cross slash",
+    pattern: "a/?/c",
+    path: "a/b/c",
+    opts: [pathname: true],
+    expected: true
+  },
+  %{
+    name: "question mark slash rejection",
+    pattern: "a/?/c",
+    path: "a//c",
+    opts: [pathname: true],
+    expected: false
+  },
+  %{
+    name: "escaped bracket literal",
+    pattern: "a\\[b",
+    path: "a[b",
+    opts: [pathname: true],
+    expected: true
+  },
+  %{
+    name: "xdigit posix class",
+    pattern: "[[:xdigit:]]",
+    path: "f",
+    opts: [pathname: true],
+    expected: true
+  },
+  %{
+    name: "xdigit posix class rejects g",
+    pattern: "[[:xdigit:]]",
+    path: "g",
+    opts: [pathname: true],
+    expected: false
   }
 ]

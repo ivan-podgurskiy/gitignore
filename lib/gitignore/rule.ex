@@ -1,5 +1,10 @@
 defmodule Gitignore.Rule do
-  @moduledoc false
+  @moduledoc """
+  Parsed gitignore rule metadata.
+
+  Rules are usually produced by `Gitignore.parse/1` rather than constructed
+  directly.
+  """
 
   defstruct [
     :pattern,

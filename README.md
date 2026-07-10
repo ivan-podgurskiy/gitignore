@@ -52,6 +52,18 @@ All paths must be binaries relative to the matcher or stack base and must use
 
 This library does not walk the filesystem. It matches paths supplied by callers.
 
+## Semantics
+
+- Last matching rule wins.
+- A negated rule starts with `!`.
+- A rule ending in `/` only matches directories and their descendants.
+- `*` and `?` do not match `/`.
+- `**/foo`, `foo/**`, and `foo/**/bar` use git's special globstar rules.
+- Re-including a file inside an ignored parent directory is not allowed,
+  matching git's parent-exclusion behavior.
+- `type: :file | :directory` is required so directory-only rules behave
+  correctly.
+
 ## Development
 
 ```bash

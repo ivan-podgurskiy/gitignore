@@ -1,5 +1,9 @@
 defmodule Gitignore.Matcher do
-  @moduledoc false
+  @moduledoc """
+  Compiled matcher for one set of gitignore rules.
+
+  Matchers are usually produced by `Gitignore.compile/2`.
+  """
 
   alias Gitignore.{Rule, Wildmatch}
 

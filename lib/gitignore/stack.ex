@@ -1,5 +1,10 @@
 defmodule Gitignore.Stack do
-  @moduledoc false
+  @moduledoc """
+  Stack of directory-scoped gitignore matchers.
+
+  A stack models nested `.gitignore` files where deeper files have stronger
+  priority than shallower files.
+  """
 
   alias Gitignore.Matcher
 
