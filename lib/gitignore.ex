@@ -36,4 +36,8 @@ defmodule Gitignore do
   @spec check(Matcher.t(), binary(), keyword()) ::
           {:ignored | :unignored, Rule.t()} | :not_ignored
   def check(%Matcher{} = matcher, path, opts), do: Matcher.check(matcher, path, opts)
+
+  @doc "Loads `.gitignore` files from `root` into a stack."
+  @spec load(Path.t(), keyword()) :: {:ok, Gitignore.Stack.t()} | {:error, term()}
+  def load(root, opts \\ []), do: Gitignore.Loader.load(root, opts)
 end
