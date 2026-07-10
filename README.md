@@ -64,6 +64,14 @@ This library does not walk the filesystem. It matches paths supplied by callers.
 - `type: :file | :directory` is required so directory-only rules behave
   correctly.
 
+## Verification
+
+The wildmatch engine passes all 756 cases extracted from git's own
+`t/t3070-wildmatch.sh` test suite (pinned to git v2.48.1), covering the
+wildmatch, iwildmatch, pathmatch, and ipathmatch modes. The fixture lives in
+`test/fixtures/wildmatch_cases.exs` and is regenerated with
+`mix run scripts/extract_t3070.exs`.
+
 ## Development
 
 ```bash

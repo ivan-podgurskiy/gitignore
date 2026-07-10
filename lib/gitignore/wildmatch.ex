@@ -4,6 +4,13 @@ defmodule Gitignore.Wildmatch do
 
   This module only matches one pattern against one path. It does not know about
   negation, directory-only rules, ignore-file ordering, or nested ignore files.
+
+  Matching is byte-oriented, like git's wildmatch: `?` matches exactly one
+  byte, and `casefold: true` folds ASCII letters only. Behavior is verified
+  against the t3070 fixture suite extracted from git, including git's quirks:
+  a malformed character class or a lone trailing backslash fails the whole
+  match, and `**` is only special when it sits between slashes or pattern
+  boundaries.
   """
 
   @type option :: {:pathname, boolean()} | {:casefold, boolean()}
@@ -13,241 +20,321 @@ defmodule Gitignore.Wildmatch do
   @doc """
   Returns true when `pattern` matches `path`.
 
-  In pathname mode, `?` and `*` do not match `/`.
+  In pathname mode, `?`, `*`, and character classes do not match `/`.
   """
   @spec match?(binary(), binary(), [option()]) :: boolean()
   def match?(pattern, path, opts \\ []) when is_binary(pattern) and is_binary(path) do
     pathname? = Keyword.get(opts, :pathname, true)
     casefold? = Keyword.get(opts, :casefold, false)
 
-    pattern
-    |> tokenize()
-    |> mark_globstars(pathname?)
-    |> match_tokens?(split_path(path), pathname?, casefold?)
+    dowild(pattern, path, nil, pathname?, casefold?) == :match
   end
 
-  defp split_path(path), do: String.graphemes(path)
+  # Recursive matcher with git's four outcomes. `:abort_all` fails the whole
+  # match (no backtracking); `:abort_to_starstar` unwinds to the nearest
+  # slash-crossing star. `prev` is the previous pattern byte, needed to decide
+  # whether `**` sits in a special position (pattern start or after a slash).
 
-  defp tokenize(pattern) do
-    pattern
-    |> String.graphemes()
-    |> do_tokenize([])
-    |> Enum.reverse()
-  end
+  defp dowild(<<>>, <<>>, _prev, _pathname?, _casefold?), do: :match
+  defp dowild(<<>>, _text, _prev, _pathname?, _casefold?), do: :nomatch
 
-  defp do_tokenize([], acc), do: acc
-  defp do_tokenize(["\\", char | rest], acc), do: do_tokenize(rest, [{:literal, char} | acc])
-  defp do_tokenize(["?" | rest], acc), do: do_tokenize(rest, [:question | acc])
-  defp do_tokenize(["*" | rest], acc), do: do_tokenize(rest, [:star | acc])
+  defp dowild(<<?*, after_star::binary>>, text, prev, pathname?, casefold?) do
+    {double?, rest} = strip_stars(after_star, false)
 
-  defp do_tokenize(["[" | rest], acc) do
-    case take_class(rest, []) do
-      {:ok, class, tail} -> do_tokenize(tail, [{:class, class} | acc])
-      :error -> do_tokenize(rest, [{:literal, "["} | acc])
+    cond do
+      not double? ->
+        star_tail(rest, text, not pathname?, pathname?, casefold?)
+
+      not pathname? ->
+        star_tail(rest, text, true, pathname?, casefold?)
+
+      special_globstar?(prev, rest) ->
+        globstar(rest, text, pathname?, casefold?)
+
+      true ->
+        star_tail(rest, text, false, pathname?, casefold?)
     end
   end
 
-  defp do_tokenize([char | rest], acc), do: do_tokenize(rest, [{:literal, char} | acc])
+  defp dowild(_pattern, <<>>, _prev, _pathname?, _casefold?), do: :abort_all
 
-  defp take_class([], _acc), do: :error
-  defp take_class(["]" | rest], []), do: take_class(rest, ["]"])
+  defp dowild(<<??, _::binary>>, <<?/, _::binary>>, _prev, true, _casefold?), do: :nomatch
 
-  defp take_class(["]" | rest], acc) do
-    if posix_class_open?(acc) do
-      take_class(rest, ["]" | acc])
+  defp dowild(<<??, rest::binary>>, <<_t_ch, t_rest::binary>>, _prev, pathname?, casefold?) do
+    dowild(rest, t_rest, ??, pathname?, casefold?)
+  end
+
+  defp dowild(<<?\\, esc, rest::binary>>, <<t_ch, t_rest::binary>>, _prev, pathname?, casefold?) do
+    # The escaped byte is compared verbatim; git does not casefold it.
+    if fold(t_ch, casefold?) == esc do
+      dowild(rest, t_rest, esc, pathname?, casefold?)
     else
-      {:ok, Enum.reverse(acc), rest}
+      :nomatch
     end
   end
 
-  defp take_class([char | rest], acc), do: take_class(rest, [char | acc])
+  defp dowild(<<?\\>>, _text, _prev, _pathname?, _casefold?), do: :nomatch
 
-  defp posix_class_open?(acc) do
-    reversed = Enum.reverse(acc)
+  defp dowild(<<?[, class::binary>>, <<t_ch, t_rest::binary>>, _prev, pathname?, casefold?) do
+    case match_class(class, fold(t_ch, casefold?), casefold?) do
+      :abort_all ->
+        :abort_all
 
-    case reversed do
-      ["[", ":" | _rest] -> not Enum.member?(reversed, "]")
-      _other -> false
+      {matched?, negated?, after_class} ->
+        cond do
+          matched? == negated? -> :nomatch
+          pathname? and t_ch == ?/ -> :nomatch
+          true -> dowild(after_class, t_rest, ?], pathname?, casefold?)
+        end
     end
   end
 
-  defp mark_globstars(tokens, false), do: tokens
-
-  defp mark_globstars(tokens, true) do
-    tokens
-    |> mark_leading_globstar()
-    |> mark_trailing_globstar()
-    |> mark_middle_globstars()
-  end
-
-  defp mark_leading_globstar([:star, :star, {:literal, "/"} | rest]),
-    do: [:globstar_leading | rest]
-
-  defp mark_leading_globstar(tokens), do: tokens
-
-  defp mark_trailing_globstar(tokens) do
-    case Enum.reverse(tokens) do
-      [:star, :star, {:literal, "/"} | reversed_rest] ->
-        Enum.reverse([:globstar_trailing | reversed_rest])
-
-      _other ->
-        tokens
+  defp dowild(<<p_ch, rest::binary>>, <<t_ch, t_rest::binary>>, _prev, pathname?, casefold?) do
+    if fold(p_ch, casefold?) == fold(t_ch, casefold?) do
+      dowild(rest, t_rest, p_ch, pathname?, casefold?)
+    else
+      :nomatch
     end
   end
 
-  defp mark_middle_globstars([{:literal, "/"}, :star, :star, {:literal, "/"} | rest]) do
-    [:globstar_middle | mark_middle_globstars(rest)]
+  # `**` is special only at the pattern start or after a slash, and only when
+  # followed by end-of-pattern, a slash, or an escaped slash.
+  defp special_globstar?(prev, rest) when prev in [nil, ?/] do
+    case rest do
+      <<>> -> true
+      <<?/, _::binary>> -> true
+      <<?\\, ?/, _::binary>> -> true
+      _ -> false
+    end
   end
 
-  defp mark_middle_globstars([token | rest]), do: [token | mark_middle_globstars(rest)]
-  defp mark_middle_globstars([]), do: []
+  defp special_globstar?(_prev, _rest), do: false
 
-  defp match_tokens?([], [], _pathname?, _casefold?), do: true
-  defp match_tokens?([], _path, _pathname?, _casefold?), do: false
-
-  defp match_tokens?([:globstar_leading | rest], path, pathname?, casefold?) do
-    match_tokens?(rest, path, pathname?, casefold?) or
-      consume_until_match(rest, path, pathname?, casefold?)
+  defp globstar(<<?/, after_slash::binary>> = rest, text, pathname?, casefold?) do
+    # `**/` first tries to match zero directories, then falls back to a
+    # slash-crossing star that requires at least one directory.
+    case dowild(after_slash, text, nil, pathname?, casefold?) do
+      :match -> :match
+      _other -> star_tail(rest, text, true, pathname?, casefold?)
+    end
   end
 
-  defp match_tokens?([:globstar_middle | rest], path, pathname?, casefold?) do
-    match_tokens?(rest, path, pathname?, casefold?) or
-      consume_until_match(rest, path, pathname?, casefold?)
+  defp globstar(rest, text, pathname?, casefold?) do
+    star_tail(rest, text, true, pathname?, casefold?)
   end
 
-  defp match_tokens?([:globstar_trailing], _path, _pathname?, _casefold?), do: true
-  defp match_tokens?([:question | _rest], ["/" | _path_rest], true, _casefold?), do: false
+  defp strip_stars(<<?*, rest::binary>>, _double?), do: strip_stars(rest, true)
+  defp strip_stars(rest, double?), do: {double?, rest}
 
-  defp match_tokens?([:question | rest], [_char | path_rest], pathname?, casefold?) do
-    match_tokens?(rest, path_rest, pathname?, casefold?)
+  # Trailing star: a slash-crossing star matches everything; a plain star
+  # matches only when no directory separator remains.
+  defp star_tail(<<>>, text, match_slash?, _pathname?, _casefold?) do
+    if not match_slash? and contains_slash?(text) do
+      :abort_to_starstar
+    else
+      :match
+    end
   end
 
-  defp match_tokens?([:star | rest], path, pathname?, casefold?) do
-    match_star?(rest, path, pathname?, casefold?)
+  # A plain star directly before a slash consumes exactly up to the next
+  # slash in the text; there is nothing else it could match.
+  defp star_tail(<<?/, rest::binary>>, text, false, pathname?, casefold?) do
+    case skip_to_slash(text) do
+      :none -> :abort_all
+      after_slash -> dowild(rest, after_slash, ?/, pathname?, casefold?)
+    end
   end
 
-  defp match_tokens?([{:class, _class} | _rest], ["/" | _path_rest], true, _casefold?), do: false
-
-  defp match_tokens?([{:class, class} | rest], [char | path_rest], pathname?, casefold?) do
-    class_match?(class, char, casefold?) and match_tokens?(rest, path_rest, pathname?, casefold?)
+  defp star_tail(rest, text, match_slash?, pathname?, casefold?) do
+    star_loop(rest, text, match_slash?, pathname?, casefold?)
   end
 
-  defp match_tokens?(
-         [{:literal, pattern_char} | rest],
-         [path_char | path_rest],
+  # Tries the remaining pattern at each position the star could stop at.
+  defp star_loop(rest, text, match_slash?, pathname?, casefold?) do
+    case advance_to_literal(rest, text, match_slash?, casefold?) do
+      abort when abort in [:abort_all, :abort_to_starstar] ->
+        abort
+
+      {:ok, <<>>} ->
+        :abort_all
+
+      {:ok, text} ->
+        try_star_position(rest, text, match_slash?, pathname?, casefold?)
+    end
+  end
+
+  defp try_star_position(
+         rest,
+         <<t_ch, t_rest::binary>> = text,
+         match_slash?,
          pathname?,
          casefold?
        ) do
-    char_equal?(pattern_char, path_char, casefold?) and
-      match_tokens?(rest, path_rest, pathname?, casefold?)
-  end
+    case dowild(rest, text, ?*, pathname?, casefold?) do
+      :nomatch when not match_slash? and t_ch == ?/ ->
+        :abort_to_starstar
 
-  defp match_tokens?(_tokens, _path, _pathname?, _casefold?), do: false
+      :nomatch ->
+        star_loop(rest, t_rest, match_slash?, pathname?, casefold?)
 
-  defp match_star?(rest, path, pathname?, casefold?) do
-    match_tokens?(rest, path, pathname?, casefold?) or
-      consume_star?(rest, path, pathname?, casefold?)
-  end
+      :abort_to_starstar when match_slash? ->
+        star_loop(rest, t_rest, match_slash?, pathname?, casefold?)
 
-  defp consume_star?(_rest, [], _pathname?, _casefold?), do: false
-  defp consume_star?(_rest, ["/" | _path_rest], true, _casefold?), do: false
-
-  defp consume_star?(rest, [_char | path_rest], pathname?, casefold?) do
-    match_star?(rest, path_rest, pathname?, casefold?)
-  end
-
-  defp consume_until_match(_rest, [], _pathname?, _casefold?), do: false
-
-  defp consume_until_match(rest, [_char | path_rest] = path, pathname?, casefold?) do
-    match_tokens?(rest, path_rest, pathname?, casefold?) or
-      consume_until_match(rest, path_rest, pathname?, casefold?) or
-      match_tokens?(rest, path, pathname?, casefold?)
-  end
-
-  defp class_match?(class, char, casefold?) do
-    {negated?, items} =
-      case class do
-        ["!" | rest] -> {true, rest}
-        ["^" | rest] -> {true, rest}
-        rest -> {false, rest}
-      end
-
-    matched? = class_items_match?(items, char, casefold?)
-    if negated?, do: not matched?, else: matched?
-  end
-
-  defp class_items_match?([], _char, _casefold?), do: false
-
-  defp class_items_match?(["[", ":" | rest], char, casefold?) do
-    case take_posix_class(rest, []) do
-      {:ok, class_name, tail} when class_name in @posix_classes ->
-        posix_class_match?(class_name, char) or class_items_match?(tail, char, casefold?)
-
-      _other ->
-        class_items_match?(rest, char, casefold?) or char_equal?("[", char, casefold?)
+      result ->
+        result
     end
   end
 
-  defp class_items_match?([left, "-", right | rest], char, casefold?) when right != "]" do
-    char_in_range?(left, right, char, casefold?) or class_items_match?(rest, char, casefold?)
+  # When the star is followed by a literal byte, every byte the star consumes
+  # up to that literal is forced, so jump straight to it. Not finding it
+  # fails this star for good: a slash-crossing star fails the whole match,
+  # a plain star unwinds so an enclosing `**` can retry further along.
+  defp advance_to_literal(<<p_ch, _::binary>>, text, match_slash?, casefold?)
+       when p_ch not in [?*, ??, ?[, ?\\] do
+    seek_byte(text, fold(p_ch, casefold?), match_slash?, casefold?)
   end
 
-  defp class_items_match?([item | rest], char, casefold?) do
-    char_equal?(item, char, casefold?) or class_items_match?(rest, char, casefold?)
+  defp advance_to_literal(_rest, text, _match_slash?, _casefold?), do: {:ok, text}
+
+  defp seek_byte(<<>>, _target, match_slash?, _casefold?), do: seek_failure(match_slash?)
+
+  defp seek_byte(<<?/, _::binary>>, target, false, _casefold?) when target != ?/,
+    do: seek_failure(false)
+
+  defp seek_byte(<<t_ch, t_rest::binary>> = text, target, match_slash?, casefold?) do
+    if fold(t_ch, casefold?) == target do
+      {:ok, text}
+    else
+      seek_byte(t_rest, target, match_slash?, casefold?)
+    end
   end
 
-  defp take_posix_class([":", "]" | rest], acc),
-    do: {:ok, acc |> Enum.reverse() |> Enum.join(), rest}
+  defp seek_failure(true), do: :abort_all
+  defp seek_failure(false), do: :abort_to_starstar
 
-  defp take_posix_class([], _acc), do: :error
-  defp take_posix_class([char | rest], acc), do: take_posix_class(rest, [char | acc])
+  # Character classes.
+  #
+  # Returns {matched?, negated?, rest_after_class} or :abort_all for a
+  # malformed class (unterminated, or an unknown POSIX class name).
+  defp match_class(class, t_ch, casefold?) do
+    {negated?, items} =
+      case class do
+        <<?!, rest::binary>> -> {true, rest}
+        <<?^, rest::binary>> -> {true, rest}
+        rest -> {false, rest}
+      end
 
-  defp posix_class_match?("alnum", char), do: ascii_alpha?(char) or ascii_digit?(char)
-  defp posix_class_match?("alpha", char), do: ascii_alpha?(char)
-  defp posix_class_match?("blank", char), do: char in ["\t", " "]
-  defp posix_class_match?("cntrl", <<char>>), do: char in 0..31 or char == 127
-  defp posix_class_match?("cntrl", _char), do: false
-  defp posix_class_match?("digit", char), do: ascii_digit?(char)
-  defp posix_class_match?("graph", <<char>>), do: char in 33..126
-  defp posix_class_match?("graph", _char), do: false
-  defp posix_class_match?("lower", <<char>>), do: char in ?a..?z
-  defp posix_class_match?("lower", _char), do: false
-  defp posix_class_match?("print", <<char>>), do: char in 32..126
-  defp posix_class_match?("print", _char), do: false
-
-  defp posix_class_match?("punct", <<char>>),
-    do: char in 33..47 or char in 58..64 or char in 91..96 or char in 123..126
-
-  defp posix_class_match?("punct", _char), do: false
-  defp posix_class_match?("space", char), do: char in ["\t", "\n", "\v", "\f", "\r", " "]
-  defp posix_class_match?("upper", <<char>>), do: char in ?A..?Z
-  defp posix_class_match?("upper", _char), do: false
-
-  defp posix_class_match?("xdigit", char),
-    do: ascii_digit?(char) or char in ~w(a b c d e f A B C D E F)
-
-  defp char_in_range?(left, right, char, false), do: left <= char and char <= right
-
-  defp char_in_range?(left, right, char, true) do
-    left = downcase_ascii(left)
-    right = downcase_ascii(right)
-    char = downcase_ascii(char)
-
-    left <= char and char <= right
+    case class_items(items, t_ch, casefold?, 0, false, true) do
+      :abort_all -> :abort_all
+      {matched?, after_class} -> {matched?, negated?, after_class}
+    end
   end
 
-  defp char_equal?(left, right, false), do: left == right
+  # Walks class items tracking the previous item byte (0 when the previous
+  # construct was a range or POSIX class) and whether this is the first item,
+  # since a leading `]` is a literal member rather than the terminator.
 
-  defp char_equal?(left, right, true) do
-    downcase_ascii(left) == downcase_ascii(right)
+  defp class_items(<<>>, _t_ch, _casefold?, _prev, _matched?, _first?), do: :abort_all
+
+  defp class_items(<<?], rest::binary>>, _t_ch, _casefold?, _prev, matched?, false),
+    do: {matched?, rest}
+
+  defp class_items(<<?\\, esc, rest::binary>>, t_ch, casefold?, _prev, matched?, _first?) do
+    class_items(rest, t_ch, casefold?, esc, matched? or t_ch == esc, false)
   end
 
-  defp ascii_alpha?(<<char>>), do: char in ?a..?z or char in ?A..?Z
-  defp ascii_alpha?(_char), do: false
+  defp class_items(<<?-, next, _::binary>> = items, t_ch, casefold?, prev, matched?, _first?)
+       when prev != 0 and next != ?] do
+    <<?-, rest::binary>> = items
 
-  defp ascii_digit?(<<char>>), do: char in ?0..?9
-  defp ascii_digit?(_char), do: false
+    case range_endpoint(rest) do
+      :abort_all ->
+        :abort_all
 
-  defp downcase_ascii(<<char>>) when char in ?A..?Z, do: <<char + 32>>
-  defp downcase_ascii(char), do: char
+      {hi, rest} ->
+        matched? = matched? or in_range?(t_ch, prev, hi, casefold?)
+        class_items(rest, t_ch, casefold?, 0, matched?, false)
+    end
+  end
+
+  defp class_items(<<?[, ?:, rest::binary>>, t_ch, casefold?, _prev, matched?, _first?) do
+    case posix_body(rest) do
+      :abort_all ->
+        :abort_all
+
+      {:posix, name, after_class} ->
+        if name in @posix_classes do
+          matched? = matched? or posix_match?(name, t_ch, casefold?)
+          class_items(after_class, t_ch, casefold?, 0, matched?, false)
+        else
+          :abort_all
+        end
+
+      :not_posix ->
+        # Reinterpret the `[` as a plain member and continue from the `:`.
+        class_items(<<?:, rest::binary>>, t_ch, casefold?, ?[, matched? or t_ch == ?[, false)
+    end
+  end
+
+  defp class_items(<<item, rest::binary>>, t_ch, casefold?, _prev, matched?, _first?) do
+    class_items(rest, t_ch, casefold?, item, matched? or t_ch == item, false)
+  end
+
+  defp range_endpoint(<<?\\, hi, rest::binary>>), do: {hi, rest}
+  defp range_endpoint(<<?\\>>), do: :abort_all
+  defp range_endpoint(<<hi, rest::binary>>), do: {hi, rest}
+
+  # Range endpoints are compared verbatim; under casefold the folded text
+  # byte gets a second chance as its uppercase counterpart.
+  defp in_range?(t_ch, lo, hi, casefold?) do
+    (t_ch >= lo and t_ch <= hi) or
+      (casefold? and t_ch in ?a..?z and t_ch - 32 >= lo and t_ch - 32 <= hi)
+  end
+
+  # A POSIX class body is everything between `[:` and the next `]`, which
+  # must end with `:` and name a known class. `[[:]` reads as plain members.
+  defp posix_body(rest) do
+    case :binary.match(rest, "]") do
+      :nomatch ->
+        :abort_all
+
+      {pos, 1} ->
+        content = binary_part(rest, 0, pos)
+        after_class = binary_part(rest, pos + 1, byte_size(rest) - pos - 1)
+
+        if byte_size(content) >= 1 and :binary.last(content) == ?: do
+          {:posix, binary_part(content, 0, byte_size(content) - 1), after_class}
+        else
+          :not_posix
+        end
+    end
+  end
+
+  defp posix_match?("alnum", t, _cf), do: alpha?(t) or digit?(t)
+  defp posix_match?("alpha", t, _cf), do: alpha?(t)
+  defp posix_match?("blank", t, _cf), do: t in [?\t, ?\s]
+  defp posix_match?("cntrl", t, _cf), do: t in 0..31 or t == 127
+  defp posix_match?("digit", t, _cf), do: digit?(t)
+  defp posix_match?("graph", t, _cf), do: t in 33..126
+  defp posix_match?("lower", t, _cf), do: t in ?a..?z
+  defp posix_match?("print", t, _cf), do: t in 32..126
+  defp posix_match?("punct", t, _cf), do: t in 33..126 and not alpha?(t) and not digit?(t)
+  defp posix_match?("space", t, _cf), do: t in [?\t, ?\n, ?\v, ?\f, ?\r, ?\s]
+  defp posix_match?("upper", t, cf), do: t in ?A..?Z or (cf and t in ?a..?z)
+  defp posix_match?("xdigit", t, _cf), do: digit?(t) or t in ?a..?f or t in ?A..?F
+
+  defp alpha?(t), do: t in ?a..?z or t in ?A..?Z
+  defp digit?(t), do: t in ?0..?9
+
+  defp contains_slash?(text), do: :binary.match(text, "/") != :nomatch
+
+  defp skip_to_slash(text) do
+    case :binary.match(text, "/") do
+      :nomatch -> :none
+      {pos, 1} -> binary_part(text, pos + 1, byte_size(text) - pos - 1)
+    end
+  end
+
+  defp fold(ch, true) when ch in ?A..?Z, do: ch + 32
+  defp fold(ch, _casefold?), do: ch
 end

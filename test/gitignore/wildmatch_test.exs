@@ -64,6 +64,10 @@ defmodule Gitignore.WildmatchTest do
       refute Wildmatch.match?("foo/**", "bar/foo/baz")
     end
 
+    test "trailing slash globstar does not match the directory itself" do
+      refute Wildmatch.match?("foo/**", "foo")
+    end
+
     test "middle slash globstar matches zero or more directories" do
       assert Wildmatch.match?("a/**/b", "a/b")
       assert Wildmatch.match?("a/**/b", "a/x/b")
