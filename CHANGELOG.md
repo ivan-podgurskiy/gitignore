@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 - Unreleased
+## v0.1.0 - 2026-07-11
 
 - Added `Gitignore.Wildmatch.match?/3`.
 - Added parsing and matching for gitignore rules.

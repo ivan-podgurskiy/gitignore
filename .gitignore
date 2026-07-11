@@ -25,6 +25,9 @@ erl_crash.dump
 # Ignore package tarball (built via `mix hex.build`).
 gitignore-*.tar
 
+# Ignore unpacked package inspection output (built via `mix hex.build --unpack`).
+/gitignore-*/
+
 # Temporary files, for example, from tests.
 /tmp/
 

@@ -11,6 +11,29 @@ by gitignore-style rules. It supports negation, directory-only rules, anchoring,
 `**`, last-match-wins, nested ignore files, and optional case-insensitive
 matching.
 
+Use it when a tool needs to respect `.gitignore`: language servers, AI agents,
+MCP servers, code generators, refactoring tools, file watchers, static site
+generators, and anything else that reads a source tree.
+
+## Why not glob?
+
+`.gitignore` is not a plain glob format. It is an ordered rule language with
+negation, directory-only rules, nested files, and Git's wildmatch behavior.
+
+| Feature | `Path.wildcard/2` / glob | `Gitignore` |
+| --- | --- | --- |
+| Negation with `!` | No | Yes |
+| Last matching rule wins | No | Yes |
+| Directory-only rules like `build/` | No | Yes |
+| Anchoring like `/tmp` or `src/*.beam` | Different language | Git-compatible |
+| Nested `.gitignore` files | No | Yes |
+| Parent-exclusion behavior | No | Yes |
+| Git wildmatch `**` semantics | Different language | Verified against Git |
+
+This matters for tooling. A matcher that treats `.gitignore` as "just glob"
+can index ignored build artifacts, miss generated files, or accidentally read
+paths that Git itself would ignore.
+
 ## Installation
 
 Add `gitignore` to your list of dependencies in `mix.exs`:
@@ -47,10 +70,44 @@ Gitignore.ignored?(matcher, "important.beam", type: :file)
 #=> false
 ```
 
-All paths must be binaries relative to the matcher or stack base and must use
-`/` as the separator. Normalize Windows paths before calling this library.
+Use `check/3` when you need the rule that made the decision:
 
-This library does not walk the filesystem. It matches paths supplied by callers.
+```elixir
+Gitignore.check(matcher, "other.beam", type: :file)
+#=> {:ignored, %Gitignore.Rule{source: "*.beam", line: 2}}
+
+Gitignore.check(matcher, "important.beam", type: :file)
+#=> {:unignored, %Gitignore.Rule{source: "!important.beam", line: 3}}
+```
+
+## Nested ignore files
+
+Use `Gitignore.Stack` when rules come from nested `.gitignore` files. Deeper
+ignore files have stronger priority, matching Git's behavior.
+
+```elixir
+stack =
+  Gitignore.Stack.new()
+  |> Gitignore.Stack.push(".", Gitignore.parse("*.beam\n"))
+  |> Gitignore.Stack.push("apps/web", Gitignore.parse("!important.beam\n"))
+
+Gitignore.Stack.ignored?(stack, "apps/api/important.beam", type: :file)
+#=> true
+
+Gitignore.Stack.ignored?(stack, "apps/web/important.beam", type: :file)
+#=> false
+```
+
+For convenience, `Gitignore.load/2` can load `.gitignore` files from disk:
+
+```elixir
+{:ok, stack} = Gitignore.load(".", recursive: true)
+Gitignore.Stack.ignored?(stack, "_build/dev/lib/app/ebin/app.beam", type: :file)
+```
+
+The core matcher does not walk your project tree or enumerate files. It answers
+whether a path you provide is ignored. The `Gitignore.load/2` helper is the
+only API that reads from disk, and it only loads `.gitignore` files.
 
 ## Semantics
 
@@ -63,6 +120,33 @@ This library does not walk the filesystem. It matches paths supplied by callers.
   matching git's parent-exclusion behavior.
 - `type: :file | :directory` is required so directory-only rules behave
   correctly.
+- All paths must be binaries relative to the matcher or stack base and must use
+  `/` as the separator. Normalize Windows paths before calling this library.
+
+Some examples that often break naive matchers:
+
+```gitignore
+# Parent exclusion: keep.txt is still ignored because build/ is ignored.
+build/
+!build/keep.txt
+
+# Directory-only rule: matches a directory named cache at any depth.
+cache/
+
+# Anchored path rule: matches tmp only beside this .gitignore file.
+/tmp
+
+# Globstar follows Git wildmatch rules.
+**/logs
+a/**/b
+```
+
+## What is not included
+
+Version 0.1 focuses on Git-compatible `.gitignore` matching. It does not include
+a filesystem walker, `.dockerignore` or `.npmignore` dialects, global Git
+excludes, or `$GIT_DIR/info/exclude` helpers. Callers can load those rule files
+themselves and push them into a `Gitignore.Stack`.
 
 ## Verification
 
