@@ -10,6 +10,10 @@ defmodule Gitignore.IgnoreCasesTest do
   @cases Code.eval_file(@fixture_path) |> elem(0)
 
   for fixture_case <- @cases do
+    check_rule? = fixture_case.rule != nil and map_size(fixture_case.files) == 1
+    rule_line = if check_rule?, do: fixture_case.rule.line
+    expected_status = if fixture_case.expected, do: :ignored, else: :unignored
+
     @tag fixture: true
     test fixture_case.name do
       c = unquote(Macro.escape(fixture_case))
@@ -23,11 +27,9 @@ defmodule Gitignore.IgnoreCasesTest do
 
       # For single-file scenarios, check/3 must attribute the same rule line
       # as `git check-ignore -v` (rule sources are ambiguous across files).
-      if c.rule != nil and map_size(c.files) == 1 do
-        expected_status = if c.expected, do: :ignored, else: :unignored
-
-        assert {^expected_status, rule} = Stack.check(stack, c.path, type: c.type)
-        assert rule.line == c.rule.line
+      if unquote(check_rule?) do
+        assert {unquote(expected_status), rule} = Stack.check(stack, c.path, type: c.type)
+        assert rule.line == unquote(rule_line)
       end
     end
   end
