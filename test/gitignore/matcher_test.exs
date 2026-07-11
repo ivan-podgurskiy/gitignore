@@ -70,18 +70,6 @@ defmodule Gitignore.MatcherTest do
     assert Gitignore.ignored?(insensitive, "readme.md", type: :file)
   end
 
-  describe "t0008-style ignore fixtures" do
-    @fixture_path Path.expand("../fixtures/ignore_cases.exs", __DIR__)
-    @cases Code.eval_file(@fixture_path) |> elem(0)
-
-    for %{name: name, rules: rules, path: path, type: type, expected: expected} <- @cases do
-      @tag fixture: true
-      test name do
-        matcher = unquote(rules) |> Gitignore.parse() |> Gitignore.compile()
-
-        assert Gitignore.ignored?(matcher, unquote(path), type: unquote(type)) ==
-                 unquote(expected)
-      end
-    end
-  end
+  # Oracle-generated ignore-semantics fixtures are exercised in
+  # test/gitignore/ignore_cases_test.exs.
 end

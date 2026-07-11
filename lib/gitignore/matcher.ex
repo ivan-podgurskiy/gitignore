@@ -24,35 +24,35 @@ defmodule Gitignore.Matcher do
     }
   end
 
+  @doc """
+  Returns the matching rule for `path`, mirroring `git check-ignore -v`.
+
+  Requires `type: :file | :directory`. Pass `parents: false` to skip the
+  ancestor-directory walk; `Gitignore.Stack` does its own walk across all
+  layered matchers.
+  """
   @spec check(t(), binary(), keyword()) :: {:ignored | :unignored, Rule.t()} | :not_ignored
   def check(%__MODULE__{} = matcher, path, opts) when is_binary(path) do
     type = Keyword.fetch!(opts, :type)
     path = normalize_relative(path)
 
-    if parent_excluded?(matcher, path) do
-      {:ignored, parent_rule(matcher, path)}
+    with true <- Keyword.get(opts, :parents, true),
+         {:ignored, rule} <- excluded_parent(matcher, path) do
+      {:ignored, rule}
     else
-      direct_check(matcher, path, type)
+      _no_excluded_parent -> direct_check(matcher, path, type)
     end
   end
 
-  defp parent_excluded?(matcher, path) do
+  # A path inside an excluded directory is ignored no matter what later
+  # rules say: git does not allow re-including anything under an excluded
+  # parent, and reports the parent's rule.
+  defp excluded_parent(matcher, path) do
     path
     |> parent_paths()
-    |> Enum.any?(fn parent ->
+    |> Enum.find_value(:not_ignored, fn parent ->
       case direct_check(matcher, parent, :directory) do
-        {:ignored, %Rule{dir_only?: true}} -> true
-        _other -> false
-      end
-    end)
-  end
-
-  defp parent_rule(matcher, path) do
-    path
-    |> parent_paths()
-    |> Enum.find_value(fn parent ->
-      case direct_check(matcher, parent, :directory) do
-        {:ignored, %Rule{dir_only?: true} = rule} -> rule
+        {:ignored, rule} -> {:ignored, rule}
         _other -> nil
       end
     end)
@@ -71,23 +71,11 @@ defmodule Gitignore.Matcher do
 
   defp rule_matches?(_matcher, %Rule{dir_only?: true}, _path, :file), do: false
 
-  defp rule_matches?(matcher, %Rule{} = rule, path, type) do
-    rule
-    |> candidate_paths(path, type)
-    |> Enum.any?(fn candidate ->
-      Wildmatch.match?(rule.pattern, candidate, pathname: true, casefold: matcher.casefold?)
-    end)
+  defp rule_matches?(matcher, %Rule{} = rule, path, _type) do
+    candidate = if rule.basename?, do: Path.basename(path), else: path
+
+    Wildmatch.match?(rule.pattern, candidate, pathname: true, casefold: matcher.casefold?)
   end
-
-  defp candidate_paths(%Rule{anchored?: true}, path, _type), do: [path]
-
-  defp candidate_paths(%Rule{basename?: true}, path, type) do
-    base = Path.basename(path)
-    descendants = if type == :file, do: parent_paths(path), else: parent_paths(path) ++ [path]
-    [base | descendants]
-  end
-
-  defp candidate_paths(_rule, path, _type), do: [path]
 
   defp parent_paths(path) do
     path

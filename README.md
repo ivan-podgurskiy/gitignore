@@ -66,11 +66,17 @@ This library does not walk the filesystem. It matches paths supplied by callers.
 
 ## Verification
 
-The wildmatch engine passes all 756 cases extracted from git's own
-`t/t3070-wildmatch.sh` test suite (pinned to git v2.48.1), covering the
-wildmatch, iwildmatch, pathmatch, and ipathmatch modes. The fixture lives in
-`test/fixtures/wildmatch_cases.exs` and is regenerated with
-`mix run scripts/extract_t3070.exs`.
+Two fixture suites pin the library to real git behavior:
+
+- **Wildmatch engine:** all 756 cases extracted from git's own
+  `t/t3070-wildmatch.sh` test suite (pinned to git v2.48.1), covering the
+  wildmatch, iwildmatch, pathmatch, and ipathmatch modes. Regenerate with
+  `mix run scripts/extract_t3070.exs`.
+- **Ignore-file semantics:** 79 cases whose expectations are produced by
+  running `git check-ignore` against materialized repository layouts,
+  covering negation and re-inclusion, parent exclusion, anchoring, dir-only
+  rules, nested ignore files, escaping, globstar, and `core.ignoreCase`.
+  Regenerate with `mix run scripts/gen_ignore_cases.exs`.
 
 ## Development
 

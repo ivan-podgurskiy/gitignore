@@ -12,3 +12,11 @@
   the engine as a byte-oriented matcher with git's abort semantics along the
   way. Matching is now byte-based: `?` matches one byte, malformed character
   classes fail the whole match, and `dir/**` no longer matches `dir` itself.
+- Verified ignore-file semantics against `git check-ignore` with 79
+  oracle-generated fixture cases (`scripts/gen_ignore_cases.exs`), fixing
+  three divergences: basename rules now exclude everything under a matched
+  nested directory (`node_modules` ignores `apps/node_modules/foo.js`),
+  parent exclusion applies to any matched directory rather than only
+  dir-only rules (`/foo` ignores `foo/bar`), and parent exclusion now spans
+  nested ignore-file layers. Rules in a directory's own `.gitignore` no
+  longer apply to that directory itself.
